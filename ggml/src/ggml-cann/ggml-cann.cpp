@@ -1086,14 +1086,12 @@ static void ggml_backend_cann_transform_q4_1(ggml_tensor* tensor,
         // After XOR 0x88 transform: quant' = quant - 8 (maps 0..15 to -8..7)
         // CANN formula: result = quant' * scale + offset
         // 
-        // To get correct result:
-        //   quant' * scale + offset = quant * d + m
-        //   (quant - 8) * d + offset = quant * d + m
-        //   offset = m + 8*d
+        // Try: offset = -m (testing if CANN uses subtraction internally)
         //
         float d_fp32 = GGML_FP16_TO_FP32(dm_ptr[0]);
         float m_fp32 = GGML_FP16_TO_FP32(dm_ptr[1]);
-        float offset_fp32 = m_fp32 + 8.0f * d_fp32;
+        float offset_fp32 = -m_fp32;  // Try -m
+        (void)d_fp32;  // suppress unused warning
         *scale_m_offset = GGML_FP32_TO_FP16(offset_fp32);
 
 #ifdef DEBUG_Q4_1_TRANSFORM
