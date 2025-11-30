@@ -1080,13 +1080,21 @@ static void ggml_backend_cann_transform_q4_1(ggml_tensor* tensor,
         // members within anonymous unions.
         const uint16_t* dm_ptr = (const uint16_t*)group;
         *scale_d_offset = dm_ptr[0];  // d is at offset 0
-        *scale_m_offset = dm_ptr[1];  // m is at offset 2 bytes (1 uint16_t)
+        
+        // Q4_1 dequantization formula: value = quant * d + m (where quant ∈ [0, 15])
+        // After XOR 0x88 transform: quant becomes (quant - 8), range [-8, 7]
+        // CANN computes: (quant - 8) * d + m' = quant*d - 8*d + m'
+        // To get correct result: m' = m + 8*d
+        float d_fp32 = GGML_FP16_TO_FP32(dm_ptr[0]);
+        float m_fp32 = GGML_FP16_TO_FP32(dm_ptr[1]);
+        float m_adjusted = m_fp32 + 8.0f * d_fp32;
+        *scale_m_offset = GGML_FP32_TO_FP16(m_adjusted);
 
 #ifdef DEBUG_Q4_1_TRANSFORM
         if (i < 3) {  // Print first 3 groups for debugging
-            fprintf(stderr, "[DEBUG Q4_1] group[%d]: d=0x%04x, m=0x%04x (d_fp32=%.6f, m_fp32=%.6f)\n",
+            fprintf(stderr, "[DEBUG Q4_1] group[%d]: d=0x%04x, m=0x%04x (d_fp32=%.6f, m_fp32=%.6f, m_adj=%.6f)\n",
                     i, dm_ptr[0], dm_ptr[1],
-                    GGML_FP16_TO_FP32(dm_ptr[0]), GGML_FP16_TO_FP32(dm_ptr[1]));
+                    d_fp32, m_fp32, m_adjusted);
         }
 #endif
 
@@ -1148,7 +1156,13 @@ static void ggml_backend_cann_transform_back_q4_1(
         // Use pointer arithmetic to safely write d and m to the union
         uint16_t* dm_ptr = (uint16_t*)group;
         dm_ptr[0] = *scale_d_offset;  // d is at offset 0
-        dm_ptr[1] = *scale_m_offset;  // m is at offset 2 bytes (1 uint16_t)
+        
+        // Reverse the m compensation done in transform: m = m' - 8*d
+        float d_fp32 = GGML_FP16_TO_FP32(*scale_d_offset);
+        float m_adjusted_fp32 = GGML_FP16_TO_FP32(*scale_m_offset);
+        float m_fp32 = m_adjusted_fp32 - 8.0f * d_fp32;
+        dm_ptr[1] = GGML_FP32_TO_FP16(m_fp32);
+        
         scale_d_offset++;
         scale_m_offset++;
 
@@ -1349,7 +1363,9 @@ static void ggml_backend_cann_transform_back(
 static bool need_transform(ggml_type type) {
     switch (type) {
         case GGML_TYPE_Q4_0:
+        case GGML_TYPE_Q4_1:
         case GGML_TYPE_Q8_0:
+        case GGML_TYPE_Q8_1:
             return true;
         default:
             return false;
