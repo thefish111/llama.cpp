@@ -1100,8 +1100,19 @@ static void ggml_backend_cann_transform_q4_1(ggml_tensor* tensor,
 
 #ifdef DEBUG_Q4_1_TRANSFORM
         if (i < 3) {  // Print first 3 groups for debugging
-            fprintf(stderr, "[DEBUG Q4_1] group[%d]: d=0x%04x, m=0x%04x (d=%.6f, m=%.6f, offset=%.6f)\n",
-                    i, dm_ptr[0], dm_ptr[1], d_fp32, m_fp32, offset_fp32);
+            uint16_t offset_fp16 = GGML_FP32_TO_FP16(offset_fp32);
+            float offset_back = GGML_FP16_TO_FP32(offset_fp16);
+            fprintf(stderr, "[DEBUG Q4_1] group[%d]: d=0x%04x, m=0x%04x, offset_stored=0x%04x\n",
+                    i, dm_ptr[0], dm_ptr[1], offset_fp16);
+            fprintf(stderr, "             d=%.6f, m=%.6f, offset=%.6f (stored=%.6f)\n",
+                    d_fp32, m_fp32, offset_fp32, offset_back);
+            // Verify: for quant=0 and quant=15, check expected values
+            float val_q0 = 0.0f * d_fp32 + m_fp32;  // original formula for quant=0
+            float val_q15 = 15.0f * d_fp32 + m_fp32; // original formula for quant=15
+            float cann_q0 = -8.0f * d_fp32 + offset_fp32;  // CANN formula for quant'=-8
+            float cann_q15 = 7.0f * d_fp32 + offset_fp32;  // CANN formula for quant'=7
+            fprintf(stderr, "             orig[q=0]=%.6f, orig[q=15]=%.6f\n", val_q0, val_q15);
+            fprintf(stderr, "             cann[q'=-8]=%.6f, cann[q'=7]=%.6f\n", cann_q0, cann_q15);
         }
 #endif
 
