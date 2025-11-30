@@ -2112,8 +2112,7 @@ static void ggml_cann_mul_mat_quant(ggml_backend_cann_context& ctx,
             // Create offset tensor for Q4_1 and Q8_1 (m/s parameter)
             aclTensor* acl_offset_tensor = nullptr;
             int64_t offset_ne_offset = 0;
-            // EXPERIMENT: Disable offset for Q4_1 to test if CANN uses it
-            if (type == GGML_TYPE_Q8_1) {  // Only Q8_1, not Q4_1
+            if (type == GGML_TYPE_Q4_1 || type == GGML_TYPE_Q8_1) {
                 acl_offset_tensor = ggml_cann_create_tensor(
                     offset_offset + batch0 * offset_stride, ACL_FLOAT16,
                     offset_elem_size, scale_ne, offset_nb, 2, ACL_FORMAT_ND,

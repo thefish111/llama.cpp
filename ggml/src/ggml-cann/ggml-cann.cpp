@@ -1082,23 +1082,20 @@ static void ggml_backend_cann_transform_q4_1(ggml_tensor* tensor,
         *scale_d_offset = dm_ptr[0];  // d is at offset 0
         
         // Q4_1 dequantization formula: value = quant * d + m (where quant ∈ [0, 15])
-        // After XOR 0x88 transform: quant becomes (quant - 8), range [-8, 7]
         // 
-        // CANN WeightQuantBatchMatmulV2 possible formula interpretations:
-        // Option 1: dequant = quant * scale + offset  ->  m' = m + 8*d
-        // Option 2: dequant = (quant - offset) * scale  -> offset = -8 - m/d
-        // 
-        // Testing Option 1: m' = m + 8*d
-        float d_fp32 = GGML_FP16_TO_FP32(dm_ptr[0]);
-        float m_fp32 = GGML_FP16_TO_FP32(dm_ptr[1]);
-        float m_adjusted = m_fp32 + 8.0f * d_fp32;
-        *scale_m_offset = GGML_FP32_TO_FP16(m_adjusted);
+        // EXPERIMENT: Don't adjust m, just pass the original value
+        // The XOR 0x88 will still be applied to quant values
+        // CANN formula seems to be: dequant = quant * scale + offset
+        // With XOR: quant' = quant - 8, so we need offset = m + 8*d
+        // But this gave worse results, so let's try just passing m directly
+        *scale_m_offset = dm_ptr[1];  // Use original m without adjustment
 
 #ifdef DEBUG_Q4_1_TRANSFORM
         if (i < 3) {  // Print first 3 groups for debugging
-            fprintf(stderr, "[DEBUG Q4_1] group[%d]: d=0x%04x, m=0x%04x (d_fp32=%.6f, m_fp32=%.6f, m_adj=%.6f)\\n",
-                    i, dm_ptr[0], dm_ptr[1],
-                    d_fp32, m_fp32, m_adjusted);
+            float d_fp32 = GGML_FP16_TO_FP32(dm_ptr[0]);
+            float m_fp32 = GGML_FP16_TO_FP32(dm_ptr[1]);
+            fprintf(stderr, "[DEBUG Q4_1] group[%d]: d=0x%04x, m=0x%04x (d_fp32=%.6f, m_fp32=%.6f)\n",
+                    i, dm_ptr[0], dm_ptr[1], d_fp32, m_fp32);
         }
 #endif
 
@@ -1160,12 +1157,7 @@ static void ggml_backend_cann_transform_back_q4_1(
         // Use pointer arithmetic to safely write d and m to the union
         uint16_t* dm_ptr = (uint16_t*)group;
         dm_ptr[0] = *scale_d_offset;  // d is at offset 0
-        
-        // Reverse the m compensation done in transform: m = m' - 8*d
-        float d_fp32 = GGML_FP16_TO_FP32(*scale_d_offset);
-        float m_adjusted_fp32 = GGML_FP16_TO_FP32(*scale_m_offset);
-        float m_fp32 = m_adjusted_fp32 - 8.0f * d_fp32;
-        dm_ptr[1] = GGML_FP32_TO_FP16(m_fp32);
+        dm_ptr[1] = *scale_m_offset;  // m is copied directly (no adjustment)
         
         scale_d_offset++;
         scale_m_offset++;
