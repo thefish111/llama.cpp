@@ -1085,19 +1085,24 @@ static void ggml_backend_cann_transform_q4_1(ggml_tensor* tensor,
         // 
         // After XOR 0x88 transform: quant' = quant - 8 (maps 0..15 to -8..7)
         // 
-        // CANN WeightQuantBatchMatmulV2 formula (hypothesis testing):
-        // Try 1: offset = m + 8*d  (if CANN uses: result = quant' * scale + offset)
-        // Try 2: offset = m        (if CANN internally handles the -8 offset)
-        // Try 3: offset = -(m + 8*d) (if CANN uses: result = quant' * scale - offset)
+        // CANN WeightQuantBatchMatmulV2 formula testing:
+        // Try 1: offset = m + 8*d     -> NMSE ~0.01-0.03 (baseline)
+        // Try 2: offset = m           -> NMSE ~0.06-0.32 (worse)
+        // Try 3: offset = -(m + 8*d)  -> testing now
         //
-        // Currently testing: Try 2 - store m directly
+        // If CANN uses: result = quant' * scale - offset (subtraction)
+        // Then: quant' * scale - offset = quant * d + m
+        //       (quant-8)*d - offset = quant*d + m
+        //       -8*d - offset = m
+        //       offset = -8*d - m = -(8*d + m)
+        //
         float d_fp32 = GGML_FP16_TO_FP32(dm_ptr[0]);
         float m_fp32 = GGML_FP16_TO_FP32(dm_ptr[1]);
         
-        // Test: store m directly without compensation
-        float offset_fp32 = m_fp32;  // Try 2: no 8*d compensation
-        // float offset_fp32 = m_fp32 + 8.0f * d_fp32;  // Try 1: with compensation
-        // float offset_fp32 = -(m_fp32 + 8.0f * d_fp32);  // Try 3: negated
+        // Try 3: negated offset
+        float offset_fp32 = -(m_fp32 + 8.0f * d_fp32);
+        // float offset_fp32 = m_fp32 + 8.0f * d_fp32;  // Try 1
+        // float offset_fp32 = m_fp32;  // Try 2
         *scale_m_offset = GGML_FP32_TO_FP16(offset_fp32);
 
 #ifdef DEBUG_Q4_1_TRANSFORM
@@ -1178,13 +1183,12 @@ static void ggml_backend_cann_transform_back_q4_1(
         dm_ptr[0] = *scale_d_offset;  // d is at offset 0
         
         // Reverse the offset calculation based on transform logic
-        // If transform stores m directly: m = offset
-        // If transform stores m + 8*d: m = offset - 8*d
+        // Try 3: offset = -(m + 8*d), so m = -offset - 8*d
         float d_fp32 = GGML_FP16_TO_FP32(*scale_d_offset);
         float offset_fp32 = GGML_FP16_TO_FP32(*scale_m_offset);
-        // Match Try 2: offset was stored as m directly
-        float m_fp32 = offset_fp32;  // Try 2
+        float m_fp32 = -offset_fp32 - 8.0f * d_fp32;  // Try 3
         // float m_fp32 = offset_fp32 - 8.0f * d_fp32;  // Try 1
+        // float m_fp32 = offset_fp32;  // Try 2
         dm_ptr[1] = GGML_FP32_TO_FP16(m_fp32);
         
         scale_d_offset++;
