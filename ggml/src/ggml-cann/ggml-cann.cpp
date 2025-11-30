@@ -1083,14 +1083,17 @@ static void ggml_backend_cann_transform_q4_1(ggml_tensor* tensor,
         
         // Q4_1 dequantization formula: value = quant * d + m (where quant ∈ [0, 15])
         // 
-        // NEW HYPOTHESIS: CANN might expect unsigned quant [0,15] directly
-        // If CANN uses: result = quant * scale + offset (with unsigned quant)
-        // Then: offset = m directly (no XOR transform, no 8*d compensation)
+        // After XOR 0x88 transform: quant' = quant - 8 (maps 0..15 to -8..7)
+        // CANN formula: result = quant' * scale + offset
+        // 
+        // To get correct result:
+        //   quant' * scale + offset = quant * d + m
+        //   (quant - 8) * d + offset = quant * d + m
+        //   offset = m + 8*d
         //
         float d_fp32 = GGML_FP16_TO_FP32(dm_ptr[0]);
         float m_fp32 = GGML_FP16_TO_FP32(dm_ptr[1]);
-        // Try: offset = m directly (no compensation, no XOR)
-        float offset_fp32 = m_fp32;
+        float offset_fp32 = m_fp32 + 8.0f * d_fp32;
         *scale_m_offset = GGML_FP32_TO_FP16(offset_fp32);
 
 #ifdef DEBUG_Q4_1_TRANSFORM
@@ -1129,18 +1132,11 @@ static void ggml_backend_cann_transform_q4_1(ggml_tensor* tensor,
         }
     }
 
-    // For Q4_1: Try NOT doing XOR 0x88 transform
-    // Because Q4_1 formula is: value = quant * d + m (quant ∈ [0,15])
-    // If CANN uses: result = quant * scale + offset with unsigned quant
-    // Then we don't need the XOR transform, and offset = m directly
-    //
-    // Comment out the XOR transform for testing:
-    /*
+    // put (uint4b_t -8) into int4b_t
     for (quant_offset = (uint8_t*)dst;
          quant_offset < (uint8_t*)dst + quant_bytes; quant_offset++) {
         (*quant_offset) ^= 0x88;
     }
-    */
 }
 
 /**
@@ -1166,13 +1162,10 @@ static void ggml_backend_cann_transform_back_q4_1(
     uint16_t* scale_d_offset = (uint16_t*)((char*)src + quant_bytes);
     uint16_t* scale_m_offset = scale_d_offset + groups;
 
-    // No XOR transform if we didn't apply it in the forward direction
-    /*
     for (; quant_offset < (uint8_t*)src + quant_bytes; quant_offset++) {
         (*quant_offset) ^= 0x88;
     }
     quant_offset = (uint8_t*)src;
-    */
 
     for (int i = 0; i < groups; i++) {
         block_q4_1* group = (block_q4_1*)((char*)dst + i * sizeof(block_q4_1));
@@ -1180,9 +1173,10 @@ static void ggml_backend_cann_transform_back_q4_1(
         uint16_t* dm_ptr = (uint16_t*)group;
         dm_ptr[0] = *scale_d_offset;  // d is at offset 0
         
-        // Since offset = m directly, m = offset
+        // Reverse: m = offset - 8*d
+        float d_fp32 = GGML_FP16_TO_FP32(*scale_d_offset);
         float offset_fp32 = GGML_FP16_TO_FP32(*scale_m_offset);
-        float m_fp32 = offset_fp32;
+        float m_fp32 = offset_fp32 - 8.0f * d_fp32;
         dm_ptr[1] = GGML_FP32_TO_FP16(m_fp32);
         
         scale_d_offset++;
