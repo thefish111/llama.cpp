@@ -1212,51 +1212,31 @@ static void ggml_backend_cann_transform_back_q4_1(
 static void ggml_backend_cann_transform_q8_1(ggml_tensor* tensor,
                                              const void* src,
                                              void* dst) {
+    // Q8_1 has: d (scale), s (sum), qs[32] (int8 quants)
+    // For CANN matrix multiplication, we only need d and qs (like Q8_0).
+    // The s value is used for dot product optimization but not needed here.
+    // 
+    // Q8_1 dequantization: value = qs[i] * d (qs is already signed int8)
+    // No offset needed since int8 is already centered around 0.
+    //
+    // Use same logic as Q8_0: just copy d and qs, ignore s.
+    
     int64_t n_elems = ggml_nelements(tensor);
     int64_t groups = n_elems / QK8_1;
     size_t quant_bytes = n_elems * sizeof(uint8_t);
 
     uint8_t* quant_offset = (uint8_t*)dst;
-    uint16_t* scale_d_offset = (uint16_t*)((char*)dst + quant_bytes);
-    uint16_t* scale_s_offset = scale_d_offset + groups;
-
-#ifdef DEBUG_Q8_1_TRANSFORM
-    // Debug: Print structure layout information
-    fprintf(stderr, "[DEBUG Q8_1] sizeof(block_q8_1)=%zu, sizeof(ggml_half)=%zu, sizeof(ggml_half2)=%zu\n",
-            sizeof(block_q8_1), sizeof(ggml_half), sizeof(ggml_half2));
-    fprintf(stderr, "[DEBUG Q8_1] n_elems=%ld, groups=%ld, quant_bytes=%zu\n",
-            (long)n_elems, (long)groups, quant_bytes);
-#endif
+    uint16_t* scale_offset = (uint16_t*)((char*)dst + quant_bytes);
 
     for (int i = 0; i < groups; i++) {
         const block_q8_1* group =
             (const block_q8_1*)((const char*)src + i * sizeof(block_q8_1));
         
-        // Use pointer arithmetic to safely access d and s from the union.
-        // This avoids potential issues with anonymous struct/union handling in C++.
-        //
-        // Memory layout of block_q8_1:
-        //   Offset 0-1: d (ggml_half = uint16_t) - scale factor
-        //   Offset 2-3: s (ggml_half = uint16_t) - sum of quantized values * d
-        //   Offset 4+:  qs[] - quantized values (int8_t)
-        //
-        // Previous code used group->d and group->s directly, which may fail
-        // in C++ when the compiler doesn't properly resolve anonymous struct
-        // members within anonymous unions.
+        // Only copy d (scale), ignore s (sum)
         const uint16_t* ds_ptr = (const uint16_t*)group;
-        *scale_d_offset = ds_ptr[0];  // d is at offset 0
-        *scale_s_offset = ds_ptr[1];  // s is at offset 2 bytes (1 uint16_t)
-
-#ifdef DEBUG_Q8_1_TRANSFORM
-        if (i < 3) {  // Print first 3 groups for debugging
-            fprintf(stderr, "[DEBUG Q8_1] group[%d]: d=0x%04x, s=0x%04x (d_fp32=%.6f, s_fp32=%.6f)\n",
-                    i, ds_ptr[0], ds_ptr[1],
-                    GGML_FP16_TO_FP32(ds_ptr[0]), GGML_FP16_TO_FP32(ds_ptr[1]));
-        }
-#endif
-
-        scale_d_offset++;
-        scale_s_offset++;
+        *scale_offset = ds_ptr[0];  // d is at offset 0
+        scale_offset++;
+        
         size_t group_quant_size = QK8_1 * sizeof(uint8_t);
         memcpy(quant_offset, group->qs, group_quant_size);
         quant_offset += group_quant_size;
@@ -1278,23 +1258,25 @@ static void ggml_backend_cann_transform_q8_1(ggml_tensor* tensor,
  */
 static void ggml_backend_cann_transform_back_q8_1(
     const ggml_tensor* tensor, const void* src, void* dst) {
+    // Reverse transform: same as Q8_0 logic, only copy d (not s)
+    // The s value will be recalculated if needed by other operations
+    
     int64_t n_elems = ggml_nelements(tensor);
     int64_t groups = n_elems / QK8_1;
     size_t quant_bytes = n_elems * sizeof(uint8_t);
 
     const uint8_t* quant_offset = (const uint8_t*)src;
-    const uint16_t* scale_d_offset =
+    const uint16_t* scale_offset =
         (const uint16_t*)((const char*)src + quant_bytes);
-    const uint16_t* scale_s_offset = scale_d_offset + groups;
 
     for (int i = 0; i < groups; i++) {
         block_q8_1* group = (block_q8_1*)((char*)dst + i * sizeof(block_q8_1));
-        // Use pointer arithmetic to safely write d and s to the union
+        // Use pointer arithmetic to safely write d to the union
+        // Set s to 0 (it will be recalculated if needed)
         uint16_t* ds_ptr = (uint16_t*)group;
-        ds_ptr[0] = *scale_d_offset;  // d is at offset 0
-        ds_ptr[1] = *scale_s_offset;  // s is at offset 2 bytes (1 uint16_t)
-        scale_d_offset++;
-        scale_s_offset++;
+        ds_ptr[0] = *scale_offset;  // d is at offset 0
+        ds_ptr[1] = 0;              // s = 0 (not preserved)
+        scale_offset++;
         size_t group_quant_size = QK8_1 * sizeof(uint8_t);
         memcpy(group->qs, quant_offset, group_quant_size);
         quant_offset += group_quant_size;

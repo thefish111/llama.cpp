@@ -2109,10 +2109,11 @@ static void ggml_cann_mul_mat_quant(ggml_backend_cann_context& ctx,
                 scale_elem_size, scale_ne, scale_nb, 2, ACL_FORMAT_ND,
                 scale_ne_offset);
             
-            // Create offset tensor for Q4_1 and Q8_1 (m/s parameter)
+            // Create offset tensor for Q4_1 only (m parameter)
+            // Q8_1 doesn't need offset - it uses signed int8 like Q8_0
             aclTensor* acl_offset_tensor = nullptr;
             int64_t offset_ne_offset = 0;
-            if (type == GGML_TYPE_Q4_1 || type == GGML_TYPE_Q8_1) {
+            if (type == GGML_TYPE_Q4_1) {
                 acl_offset_tensor = ggml_cann_create_tensor(
                     offset_offset + batch0 * offset_stride, ACL_FLOAT16,
                     offset_elem_size, scale_ne, offset_nb, 2, ACL_FORMAT_ND,
@@ -2160,9 +2161,10 @@ static void ggml_cann_mul_mat_quant(ggml_backend_cann_context& ctx,
                     scale_elem_size, scale_ne, scale_nb, 2, ACL_FORMAT_ND,
                     scale_ne_offset);
                 
-                // Create offset tensor for Q4_1 and Q8_1 in splits
+                // Create offset tensor for Q4_1 only in splits
+                // Q8_1 doesn't need offset - it uses signed int8 like Q8_0
                 acl_offset_tensor = nullptr;
-                if (type == GGML_TYPE_Q4_1 || type == GGML_TYPE_Q8_1) {
+                if (type == GGML_TYPE_Q4_1) {
                     offset_ne_offset += offset_elem_size * scale_ne[0] * scale_ne[1];
                     acl_offset_tensor = ggml_cann_create_tensor(
                         offset_offset + batch0 * offset_stride, ACL_FLOAT16,
