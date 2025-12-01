@@ -3195,7 +3195,6 @@ static void ggml_cann_mul_mat_id_quant(ggml_backend_cann_context& ctx, ggml_tens
 
             void* src0_tmp_ptr = src0_original + i02*weight_stride;
             void* scale_tmp_ptr = src0_original + weight_size + i02*scale_stride;
-            void* offset_tmp_ptr = src0_original + weight_size + scale_stride * ne02 * ne03 + i02*offset_stride;
             void* src1_tmp_ptr = src1_original + i11*nb11 + i12*nb12;
             void* dst_tmp_ptr  = dst_original  + i1*nb1   + i2*nb2;
 
@@ -3206,8 +3205,10 @@ static void ggml_cann_mul_mat_id_quant(ggml_backend_cann_context& ctx, ggml_tens
             ggml_cann_async_memcpy(ctx, scale_buffer, scale_tmp_ptr, scale_stride,
                 ACL_MEMCPY_DEVICE_TO_DEVICE);
             
-            // Copy offset (m/s) for Q4_1/Q8_1
-            if (type == GGML_TYPE_Q4_1 || type == GGML_TYPE_Q8_1) {
+            // Copy offset (m) for Q4_1 only
+            // Q8_1 doesn't need offset - it uses signed int8 like Q8_0
+            if (type == GGML_TYPE_Q4_1) {
+                void* offset_tmp_ptr = src0_original + weight_size + scale_stride * ne02 * ne03 + i02*offset_stride;
                 void* offset_buffer = (char*)scale_buffer + scale_stride;
                 ggml_cann_async_memcpy(ctx, offset_buffer, offset_tmp_ptr, offset_stride,
                     ACL_MEMCPY_DEVICE_TO_DEVICE);
