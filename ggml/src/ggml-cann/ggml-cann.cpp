@@ -2579,12 +2579,6 @@ static enum ggml_status ggml_backend_cann_graph_compute(
  */
 static bool ggml_backend_cann_supports_op(ggml_backend_dev_t dev,
                                                     const ggml_tensor* op) {
-    // Debug: check if any tensor in the graph has Q8_1 type
-    bool involves_q8_1 = false;
-    if (op->src[0] && op->src[0]->type == GGML_TYPE_Q8_1) involves_q8_1 = true;
-    if (op->src[1] && op->src[1]->type == GGML_TYPE_Q8_1) involves_q8_1 = true;
-    if (op->type == GGML_TYPE_Q8_1) involves_q8_1 = true;
-    
     switch (op->op) {
         case GGML_OP_UNARY:
             switch (ggml_get_unary_op(op)) {
@@ -2620,9 +2614,6 @@ static bool ggml_backend_cann_supports_op(ggml_backend_dev_t dev,
             }
             break;
         case GGML_OP_MUL_MAT: {
-            // Debug: always print for Q8_1 to diagnose "not supported" issue
-            bool is_q8_1 = (op->src[0]->type == GGML_TYPE_Q8_1);
-            
             switch (op->src[0]->type) {
                 case GGML_TYPE_F16:
                 case GGML_TYPE_F32:
@@ -2632,30 +2623,16 @@ static bool ggml_backend_cann_supports_op(ggml_backend_dev_t dev,
                 case GGML_TYPE_Q8_0:
                 case GGML_TYPE_Q8_1:
 #ifdef ASCEND_310P
-                    // Q4 && Q8 per group is not suppor on 310p device
-                    if (is_q8_1) {
-                        fprintf(stderr, "[CANN DEBUG] MUL_MAT Q8_1: REJECTED (ASCEND_310P defined)\n");
-                    }
+                    // Q4 && Q8 per group is not supported on 310p device
                     return false;
 #endif
                     {
                         // only support contiguous for quantized types.
                         bool src0_contig = ggml_is_contiguous(op->src[0]);
                         bool src1_contig = ggml_is_contiguous(op->src[1]);
-                        bool result = src0_contig && src1_contig;
-                        
-                        if (is_q8_1) {
-                            fprintf(stderr, "[CANN DEBUG] MUL_MAT Q8_1: src0_contig=%d src1_contig=%d => %s\n",
-                                    src0_contig, src1_contig,
-                                    result ? "SUPPORTED" : "NOT_SUPPORTED");
-                        }
-                        
-                        return result;
+                        return src0_contig && src1_contig;
                     }
                 default:
-                    if (is_q8_1) {
-                        fprintf(stderr, "[CANN DEBUG] MUL_MAT Q8_1: fell through to default (unexpected)\n");
-                    }
                     return false;
             }
         }
@@ -2880,10 +2857,6 @@ static bool ggml_backend_cann_supports_op(ggml_backend_dev_t dev,
             return true;
         }
         default:
-            if (involves_q8_1) {
-                fprintf(stderr, "[CANN DEBUG] Q8_1 related tensor: op=%s (op_id=%d) returning false (unhandled op type)\n",
-                        ggml_op_name(op->op), (int)op->op);
-            }
             return false;
     }
 

@@ -1108,9 +1108,6 @@ struct test_case {
         for (ggml_backend_t backend : {backend1, backend2}) {
             for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
                 if (!ggml_backend_supports_op(backend, t)) {
-                    // Debug: print which tensor/op failed
-                    fprintf(stderr, "[TEST DEBUG] Unsupported: backend=%s tensor=%s op=%s type=%s\n",
-                            ggml_backend_name(backend), t->name, ggml_op_name(t->op), ggml_type_name(t->type));
                     supported = false;
                     break;
                 }
@@ -5927,7 +5924,12 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
 
 #if 1
     for (ggml_type type_a : base_types) {
-        for (ggml_type type_b : {GGML_TYPE_F16, GGML_TYPE_F32 }) {
+        // For Q8_1, CPU backend only supports F32 as type_b (not F16)
+        // because Q8_1's vec_dot_type is Q8_1, not compatible with F16
+        std::vector<ggml_type> type_bs = (type_a == GGML_TYPE_Q8_1) 
+            ? std::vector<ggml_type>{GGML_TYPE_F32}
+            : std::vector<ggml_type>{GGML_TYPE_F16, GGML_TYPE_F32};
+        for (ggml_type type_b : type_bs) {
             std::vector<int> ks = { 256 };
             if (ggml_blck_size(type_a) == 1) {
                 ks.push_back(4);
