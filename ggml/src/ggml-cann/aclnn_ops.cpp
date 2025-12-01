@@ -2169,6 +2169,10 @@ static void ggml_cann_mul_mat_quant(ggml_backend_cann_context& ctx,
             } else {
                 ggml_cann_release_resources(ctx, acl_weight_tensor, acl_scale_tensor, acl_output_tensor);
             }
+            
+            if (type == GGML_TYPE_Q8_1) {
+                fprintf(stderr, "[Q8_1 DEBUG] After release_resources (first split)\n");
+            }
 
             // other splits
             for (int64_t split = 1; split < split_size; split++) {
@@ -2220,11 +2224,23 @@ static void ggml_cann_mul_mat_quant(ggml_backend_cann_context& ctx,
             }
 
             ggml_cann_release_resources(ctx, acl_input_tensor);
+            
+            if (type == GGML_TYPE_Q8_1) {
+                fprintf(stderr, "[Q8_1 DEBUG] After release acl_input_tensor, exiting batch loop\n");
+            }
         }
+    }
+
+    if (type == GGML_TYPE_Q8_1) {
+        fprintf(stderr, "[Q8_1 DEBUG] Batch loops completed, dst->type=%d\n", dst->type);
     }
 
     // cast out
     if (dst->type != GGML_TYPE_F16) {
+        if (type == GGML_TYPE_Q8_1) {
+            fprintf(stderr, "[Q8_1 DEBUG] Starting cast out\n");
+        }
+        
         int64_t* output_cast_ne = dst->ne;
         size_t output_cast_nb[GGML_MAX_DIMS];
         output_cast_nb[0] = sizeof(uint16_t);
@@ -2235,10 +2251,28 @@ static void ggml_cann_mul_mat_quant(ggml_backend_cann_context& ctx,
         aclTensor* acl_output_tensor = ggml_cann_create_tensor(
             output_buffer, ACL_FLOAT16, output_elem_size, output_cast_ne,
             output_cast_nb, GGML_MAX_DIMS);
+        
+        if (type == GGML_TYPE_Q8_1) {
+            fprintf(stderr, "[Q8_1 DEBUG] Created acl_output_tensor for cast\n");
+        }
+        
         aclTensor* acl_dst_tensor = ggml_cann_create_tensor(dst);
+        
+        if (type == GGML_TYPE_Q8_1) {
+            fprintf(stderr, "[Q8_1 DEBUG] Created acl_dst_tensor, calling aclnn_cast\n");
+        }
+        
         aclnn_cast(ctx, acl_output_tensor, acl_dst_tensor, ggml_cann_type_mapping(dst->type));
 
+        if (type == GGML_TYPE_Q8_1) {
+            fprintf(stderr, "[Q8_1 DEBUG] aclnn_cast completed\n");
+        }
+
         ggml_cann_release_resources(ctx, acl_output_tensor, acl_dst_tensor);
+        
+        if (type == GGML_TYPE_Q8_1) {
+            fprintf(stderr, "[Q8_1 DEBUG] mul_mat_quant completed successfully\n");
+        }
     }
 }
 
