@@ -2003,17 +2003,6 @@ static void ggml_cann_mul_mat_quant(ggml_backend_cann_context& ctx,
     ggml_tensor* src0 = dst->src[0];  // weight
     ggml_tensor* src1 = dst->src[1];  // input
 
-    // Debug output for Q8_1
-    if (type == GGML_TYPE_Q8_1) {
-        fprintf(stderr, "[Q8_1 DEBUG] mul_mat_quant started\n");
-        fprintf(stderr, "[Q8_1 DEBUG] src0: ne=[%ld,%ld,%ld,%ld] data=%p\n",
-                (long)src0->ne[0], (long)src0->ne[1], (long)src0->ne[2], (long)src0->ne[3], src0->data);
-        fprintf(stderr, "[Q8_1 DEBUG] src1: ne=[%ld,%ld,%ld,%ld] type=%d data=%p\n",
-                (long)src1->ne[0], (long)src1->ne[1], (long)src1->ne[2], (long)src1->ne[3], src1->type, src1->data);
-        fprintf(stderr, "[Q8_1 DEBUG] dst: ne=[%ld,%ld,%ld,%ld] type=%d\n",
-                (long)dst->ne[0], (long)dst->ne[1], (long)dst->ne[2], (long)dst->ne[3], dst->type);
-    }
-
     // The shape of the weight is NCHW.
     // Matrix multiplication uses HW dims.
     // HC is regarded as batch.
@@ -2088,13 +2077,6 @@ static void ggml_cann_mul_mat_quant(ggml_backend_cann_context& ctx,
     // aclnn
     int64_t max_elem_size = 65535;
     int64_t split_size = (src0->ne[1] / max_elem_size) + 1;
-    
-    if (type == GGML_TYPE_Q8_1) {
-        fprintf(stderr, "[Q8_1 DEBUG] weight_size=%zu scale_offset=%p offset_offset=%p\n",
-                weight_size, scale_offset, offset_offset);
-        fprintf(stderr, "[Q8_1 DEBUG] split_size=%ld, starting batch loops\n", (long)split_size);
-    }
-    
     ggml_cann_pool_alloc workspace_allocator(ctx.pool());
     for (int64_t n1 = 0; n1 < src1->ne[3]; n1++) {
         for (int64_t c1 = 0; c1 < src1->ne[2]; c1++) {
@@ -2146,32 +2128,15 @@ static void ggml_cann_mul_mat_quant(ggml_backend_cann_context& ctx,
             if (src0->ne[0] > QK8_0) {
                 antiquantGroupSize = QK8_0;
             }
-            
-            if (type == GGML_TYPE_Q8_1) {
-                fprintf(stderr, "[Q8_1 DEBUG] Before ACLNN call: batch0=%ld batch1=%ld antiquantGroupSize=%ld\n",
-                        (long)batch0, (long)batch1, (long)antiquantGroupSize);
-                fprintf(stderr, "[Q8_1 DEBUG] weight_ne=[%ld,%ld] scale_ne=[%ld,%ld] output_ne=[%ld,%ld]\n",
-                        (long)weight_ne[0], (long)weight_ne[1], (long)scale_ne[0], (long)scale_ne[1],
-                        (long)output_ne[0], (long)output_ne[1]);
-            }
-            
             GGML_CANN_CALL_ACLNN_OP(ctx, WeightQuantBatchMatmulV2, acl_input_tensor,
                            acl_weight_tensor, acl_scale_tensor, acl_offset_tensor,
                            nullptr, nullptr, nullptr, antiquantGroupSize,
                            acl_output_tensor);
-            
-            if (type == GGML_TYPE_Q8_1) {
-                fprintf(stderr, "[Q8_1 DEBUG] After ACLNN call succeeded\n");
-            }
             if (acl_offset_tensor) {
                 ggml_cann_release_resources(ctx, acl_weight_tensor, acl_scale_tensor, 
                                           acl_offset_tensor, acl_output_tensor);
             } else {
                 ggml_cann_release_resources(ctx, acl_weight_tensor, acl_scale_tensor, acl_output_tensor);
-            }
-            
-            if (type == GGML_TYPE_Q8_1) {
-                fprintf(stderr, "[Q8_1 DEBUG] After release_resources (first split)\n");
             }
 
             // other splits
@@ -2224,23 +2189,11 @@ static void ggml_cann_mul_mat_quant(ggml_backend_cann_context& ctx,
             }
 
             ggml_cann_release_resources(ctx, acl_input_tensor);
-            
-            if (type == GGML_TYPE_Q8_1) {
-                fprintf(stderr, "[Q8_1 DEBUG] After release acl_input_tensor, exiting batch loop\n");
-            }
         }
-    }
-
-    if (type == GGML_TYPE_Q8_1) {
-        fprintf(stderr, "[Q8_1 DEBUG] Batch loops completed, dst->type=%d\n", dst->type);
     }
 
     // cast out
     if (dst->type != GGML_TYPE_F16) {
-        if (type == GGML_TYPE_Q8_1) {
-            fprintf(stderr, "[Q8_1 DEBUG] Starting cast out\n");
-        }
-        
         int64_t* output_cast_ne = dst->ne;
         size_t output_cast_nb[GGML_MAX_DIMS];
         output_cast_nb[0] = sizeof(uint16_t);
@@ -2251,38 +2204,14 @@ static void ggml_cann_mul_mat_quant(ggml_backend_cann_context& ctx,
         aclTensor* acl_output_tensor = ggml_cann_create_tensor(
             output_buffer, ACL_FLOAT16, output_elem_size, output_cast_ne,
             output_cast_nb, GGML_MAX_DIMS);
-        
-        if (type == GGML_TYPE_Q8_1) {
-            fprintf(stderr, "[Q8_1 DEBUG] Created acl_output_tensor for cast\n");
-        }
-        
         aclTensor* acl_dst_tensor = ggml_cann_create_tensor(dst);
-        
-        if (type == GGML_TYPE_Q8_1) {
-            fprintf(stderr, "[Q8_1 DEBUG] Created acl_dst_tensor, calling aclnn_cast\n");
-        }
-        
         aclnn_cast(ctx, acl_output_tensor, acl_dst_tensor, ggml_cann_type_mapping(dst->type));
-
-        if (type == GGML_TYPE_Q8_1) {
-            fprintf(stderr, "[Q8_1 DEBUG] aclnn_cast completed\n");
-        }
-
         ggml_cann_release_resources(ctx, acl_output_tensor, acl_dst_tensor);
-        
-        if (type == GGML_TYPE_Q8_1) {
-            fprintf(stderr, "[Q8_1 DEBUG] mul_mat_quant completed successfully\n");
-        }
     }
 }
 
 void ggml_cann_mul_mat(ggml_backend_cann_context& ctx, ggml_tensor* dst) {
     const enum ggml_type type = dst->src[0]->type;
-    
-    if (type == GGML_TYPE_Q8_1) {
-        fprintf(stderr, "[Q8_1 DEBUG] ggml_cann_mul_mat called\n");
-    }
-    
     switch (type) {
         case GGML_TYPE_F32:
         case GGML_TYPE_F16:
@@ -2293,9 +2222,6 @@ void ggml_cann_mul_mat(ggml_backend_cann_context& ctx, ggml_tensor* dst) {
         case GGML_TYPE_Q8_0:
         case GGML_TYPE_Q8_1:
             ggml_cann_mul_mat_quant(ctx, dst, type);
-            if (type == GGML_TYPE_Q8_1) {
-                fprintf(stderr, "[Q8_1 DEBUG] ggml_cann_mul_mat returning\n");
-            }
             break;
         default:
             GGML_ABORT("Unsupported type for mul_mat");
