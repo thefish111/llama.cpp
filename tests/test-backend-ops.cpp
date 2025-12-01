@@ -1108,6 +1108,9 @@ struct test_case {
         for (ggml_backend_t backend : {backend1, backend2}) {
             for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
                 if (!ggml_backend_supports_op(backend, t)) {
+                    // Debug: print which tensor/op failed
+                    fprintf(stderr, "[TEST DEBUG] Unsupported: backend=%s tensor=%s op=%s type=%s\n",
+                            ggml_backend_name(backend), t->name, ggml_op_name(t->op), ggml_type_name(t->type));
                     supported = false;
                     break;
                 }
