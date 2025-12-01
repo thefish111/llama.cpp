@@ -1219,23 +1219,28 @@ static void ggml_backend_cann_transform_q8_1(ggml_tensor* tensor,
     // Q8_1 dequantization: value = qs[i] * d (qs is already signed int8)
     // No offset needed since int8 is already centered around 0.
     //
-    // Use same logic as Q8_0: just copy d and qs, ignore s.
+    // Data layout after transform: [all qs][all d][all s]
+    // We still copy s to maintain the same total size as original data,
+    // even though s is not used in matrix multiplication.
     
     int64_t n_elems = ggml_nelements(tensor);
     int64_t groups = n_elems / QK8_1;
     size_t quant_bytes = n_elems * sizeof(uint8_t);
 
     uint8_t* quant_offset = (uint8_t*)dst;
-    uint16_t* scale_offset = (uint16_t*)((char*)dst + quant_bytes);
+    uint16_t* scale_d_offset = (uint16_t*)((char*)dst + quant_bytes);
+    uint16_t* scale_s_offset = scale_d_offset + groups;  // s comes after all d values
 
     for (int i = 0; i < groups; i++) {
         const block_q8_1* group =
             (const block_q8_1*)((const char*)src + i * sizeof(block_q8_1));
         
-        // Only copy d (scale), ignore s (sum)
+        // Copy both d and s to maintain data size
         const uint16_t* ds_ptr = (const uint16_t*)group;
-        *scale_offset = ds_ptr[0];  // d is at offset 0
-        scale_offset++;
+        *scale_d_offset = ds_ptr[0];  // d is at offset 0
+        *scale_s_offset = ds_ptr[1];  // s is at offset 1
+        scale_d_offset++;
+        scale_s_offset++;
         
         size_t group_quant_size = QK8_1 * sizeof(uint8_t);
         memcpy(quant_offset, group->qs, group_quant_size);
@@ -1258,25 +1263,24 @@ static void ggml_backend_cann_transform_q8_1(ggml_tensor* tensor,
  */
 static void ggml_backend_cann_transform_back_q8_1(
     const ggml_tensor* tensor, const void* src, void* dst) {
-    // Reverse transform: same as Q8_0 logic, only copy d (not s)
-    // The s value will be recalculated if needed by other operations
+    // Reverse transform: restore d, s, and qs from [all qs][all d][all s] layout
     
     int64_t n_elems = ggml_nelements(tensor);
     int64_t groups = n_elems / QK8_1;
     size_t quant_bytes = n_elems * sizeof(uint8_t);
 
     const uint8_t* quant_offset = (const uint8_t*)src;
-    const uint16_t* scale_offset =
-        (const uint16_t*)((const char*)src + quant_bytes);
+    const uint16_t* scale_d_offset = (const uint16_t*)((const char*)src + quant_bytes);
+    const uint16_t* scale_s_offset = scale_d_offset + groups;
 
     for (int i = 0; i < groups; i++) {
         block_q8_1* group = (block_q8_1*)((char*)dst + i * sizeof(block_q8_1));
-        // Use pointer arithmetic to safely write d to the union
-        // Set s to 0 (it will be recalculated if needed)
+        // Use pointer arithmetic to safely write d and s to the union
         uint16_t* ds_ptr = (uint16_t*)group;
-        ds_ptr[0] = *scale_offset;  // d is at offset 0
-        ds_ptr[1] = 0;              // s = 0 (not preserved)
-        scale_offset++;
+        ds_ptr[0] = *scale_d_offset;  // d is at offset 0
+        ds_ptr[1] = *scale_s_offset;  // s is at offset 1
+        scale_d_offset++;
+        scale_s_offset++;
         size_t group_quant_size = QK8_1 * sizeof(uint8_t);
         memcpy(group->qs, quant_offset, group_quant_size);
         quant_offset += group_quant_size;
