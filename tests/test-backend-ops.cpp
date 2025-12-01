@@ -5388,7 +5388,7 @@ static const ggml_type all_types[] = {
 static const ggml_type base_types[] = {
     // GGML_TYPE_F32, GGML_TYPE_F16,
     GGML_TYPE_Q8_0, // for I8MM tests
-    GGML_TYPE_Q8_1, // for test use kun
+    GGML_TYPE_Q8_1, // Q8_1 as weight matrix (now supported with vec_dot_q8_1_q8_1)
     GGML_TYPE_Q4_0,
     GGML_TYPE_Q4_1, // for I8MM tests
     // GGML_TYPE_Q4_K,
@@ -5924,12 +5924,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
 
 #if 1
     for (ggml_type type_a : base_types) {
-        // For Q8_1, CPU backend only supports F32 as type_b (not F16)
-        // because Q8_1's vec_dot_type is Q8_1, not compatible with F16
-        std::vector<ggml_type> type_bs = (type_a == GGML_TYPE_Q8_1) 
-            ? std::vector<ggml_type>{GGML_TYPE_F32}
-            : std::vector<ggml_type>{GGML_TYPE_F16, GGML_TYPE_F32};
-        for (ggml_type type_b : type_bs) {
+        for (ggml_type type_b : {GGML_TYPE_F16, GGML_TYPE_F32}) {
             std::vector<int> ks = { 256 };
             if (ggml_blck_size(type_a) == 1) {
                 ks.push_back(4);
