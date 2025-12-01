@@ -2278,6 +2278,11 @@ static void ggml_cann_mul_mat_quant(ggml_backend_cann_context& ctx,
 
 void ggml_cann_mul_mat(ggml_backend_cann_context& ctx, ggml_tensor* dst) {
     const enum ggml_type type = dst->src[0]->type;
+    
+    if (type == GGML_TYPE_Q8_1) {
+        fprintf(stderr, "[Q8_1 DEBUG] ggml_cann_mul_mat called\n");
+    }
+    
     switch (type) {
         case GGML_TYPE_F32:
         case GGML_TYPE_F16:
@@ -2288,6 +2293,9 @@ void ggml_cann_mul_mat(ggml_backend_cann_context& ctx, ggml_tensor* dst) {
         case GGML_TYPE_Q8_0:
         case GGML_TYPE_Q8_1:
             ggml_cann_mul_mat_quant(ctx, dst, type);
+            if (type == GGML_TYPE_Q8_1) {
+                fprintf(stderr, "[Q8_1 DEBUG] ggml_cann_mul_mat returning\n");
+            }
             break;
         default:
             GGML_ABORT("Unsupported type for mul_mat");

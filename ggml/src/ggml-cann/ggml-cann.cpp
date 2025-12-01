@@ -1526,6 +1526,12 @@ static void ggml_backend_cann_buffer_get_tensor(
 
     ggml_cann_set_device(ctx->device);
 
+    // Debug: check if this is related to Q8_1 test
+    static int get_tensor_call = 0;
+    get_tensor_call++;
+    fprintf(stderr, "[DEBUG] get_tensor #%d: tensor=%s type=%d size=%zu offset=%zu data=%p\n",
+            get_tensor_call, tensor->name, tensor->type, size, offset, tensor->data);
+
     if (!need_transform(tensor->type)) {
         ACL_CHECK(aclrtMemcpy(data, size, (char*)tensor->data + offset, size,
                               ACL_MEMCPY_DEVICE_TO_HOST));
@@ -1537,6 +1543,8 @@ static void ggml_backend_cann_buffer_get_tensor(
         ggml_backend_cann_transform_back(tensor, transform_buffer, data);
         free(transform_buffer);
     }
+    
+    fprintf(stderr, "[DEBUG] get_tensor #%d completed\n", get_tensor_call);
 }
 
 /**
@@ -2498,6 +2506,12 @@ static void evaluate_and_capture_cann_graph(ggml_backend_cann_context * cann_ctx
             }
 
             bool ok = ggml_cann_compute_forward(*cann_ctx, node);
+            
+            // Debug for Q8_1 MUL_MAT
+            if (node->op == GGML_OP_MUL_MAT && node->src[0] && node->src[0]->type == GGML_TYPE_Q8_1) {
+                fprintf(stderr, "[Q8_1 DEBUG] ggml_cann_compute_forward returned ok=%d\n", ok);
+            }
+            
             if (!ok) {
                 GGML_LOG_ERROR("%s: op not supported %s (%s)\n", __func__, node->name, ggml_op_name(node->op));
             }
