@@ -1027,6 +1027,97 @@ static void ggml_backend_cann_transform_back_q8_0(
     }
 }
 
+static inline float fp16_to_fp32(uint16_t h) {
+    // 使用你的 fp16 转换函数，这里提供一个通用实现
+    uint32_t sign = (h & 0x8000) << 16;
+    uint32_t exp  = (h & 0x7C00) >> 10;
+    uint32_t mant = (h & 0x03FF);
+    uint32_t f;
+
+    if (exp == 0) {
+        if (mant == 0) {
+            f = sign;
+        } else {
+            // subnormal
+            float m = mant / 1024.0f;
+            float v = ldexpf(m, -14);
+            memcpy(&f, &v, 4);
+            f |= sign;
+        }
+    } else if (exp == 31) {
+        f = sign | 0x7F800000 | (mant << 13);
+    } else {
+        uint32_t e = exp - 15 + 127;
+        f = sign | (e << 23) | (mant << 13);
+    }
+    return *(float*)&f;
+}
+
+/*
+    q4_1 → q4_0 预转换：
+
+    输入：
+        src: q4_1 block 们
+        dst: 中间缓冲区（与 q4_0 transform_back 要求一致）
+             格式：[packed quant][uint16_t scales...]
+
+    tensor->nelements 必须能被 32 整除
+*/
+void ggml_backend_cann_transform_pre_q4_1_to_q4_0(
+    const ggml_tensor * tensor, const void * src, void * dst)
+{
+    int64_t n_elems = ggml_nelements(tensor);
+    int64_t groups = n_elems / QK4_0;
+
+    block_q4_1 * b1 = (block_q4_1 *)src;
+
+    // q4_0 的中间存储格式：
+    //   前半部分是 packed 4-bit (每 2 个值一个字节)
+    //   后半部分是 uint16_t scale
+    uint8_t  * quant = (uint8_t *)dst;
+    uint16_t * scales = (uint16_t *)(quant + n_elems/2);
+
+    for (int g = 0; g < groups; g++) {
+        block_q4_1 * blk = &b1[g];
+
+        float d = fp16_to_fp32(blk->d);
+        float m = fp16_to_fp32(blk->m);
+
+        // 解码 q4_1 block
+        float vals[QK4_0];
+        for (int i = 0; i < QK4_0; i++) {
+            uint8_t q = blk->qs[i];
+            float v = d * (q - 8) + m;
+            vals[i] = v - m;   // 去 mean，使得 q4_0 无 bias
+        }
+
+        // 计算 q4_0 的 scale
+        float max_abs = 0.0f;
+        for (int i = 0; i < QK4_0; i++) {
+            float a = fabsf(vals[i]);
+            if (a > max_abs) max_abs = a;
+        }
+
+        float d0 = (max_abs > 0) ? (max_abs / 7.0f) : 1.0f;
+        scales[g] = (uint16_t)(d0 * 256.0f);   // 按照 q4_0 使用的 scale 编码方式
+
+        // 重新量化到 0~15
+        uint8_t qs_q4_0[QK4_0];
+        for (int i = 0; i < QK4_0; i++) {
+            float q = vals[i] / d0;
+            int qi = (int)roundf(q + 8); // shift to unsigned
+            if (qi < 0) qi = 0;
+            if (qi > 15) qi = 15;
+            qs_q4_0[i] = (uint8_t)qi;
+        }
+
+        // pack 成两个 4-bit
+        uint8_t * qdst = quant + g * (QK4_0/2);
+        for (int i = 0; i < QK4_0; i += 2) {
+            qdst[i/2] = (qs_q4_0[i]) | (qs_q4_0[i+1] << 4);
+        }
+    }
+}
 /**
  * @brief Transform quantized Q4.1 tensor data into a format suitable for CANN
  * processing.
@@ -1040,102 +1131,53 @@ static void ggml_backend_cann_transform_back_q8_0(
  * @param dst Pointer to the destination buffer where transformed data will be
  * stored.
  */
-static void ggml_backend_cann_transform_q4_1(ggml_tensor* tensor,
-                                             const void* src,
-                                             void* dst) {
+static void ggml_backend_cann_transform_q4_1(
+    ggml_tensor* tensor,
+    const void* src,
+    void* dst) {
+
     int64_t n_elems = ggml_nelements(tensor);
     int64_t groups = n_elems / QK4_1;
-    size_t quant_bytes = n_elems * sizeof(uint8_t) / 2;
+    size_t quant_bytes = n_elems / 2;
 
     uint8_t* quant_offset = (uint8_t*)dst;
-    uint16_t* scale_d_offset = (uint16_t*)((char*)dst + quant_bytes);
-    uint16_t* scale_m_offset = scale_d_offset + groups;
+    uint16_t* scale_offset = (uint16_t*)((char*)dst + quant_bytes);
+    uint16_t* mean_offset  = scale_offset + groups;
 
-#ifdef DEBUG_Q4_1_TRANSFORM
-    // Debug: Print structure layout information
-    fprintf(stderr, "[DEBUG Q4_1] sizeof(block_q4_1)=%zu, sizeof(ggml_half)=%zu, sizeof(ggml_half2)=%zu\n",
-            sizeof(block_q4_1), sizeof(ggml_half), sizeof(ggml_half2));
-    fprintf(stderr, "[DEBUG Q4_1] n_elems=%ld, groups=%ld, quant_bytes=%zu\n",
-            (long)n_elems, (long)groups, quant_bytes);
-#endif
+    for (int g = 0; g < groups; g++) {
 
-    for (int i = 0; i < groups; i++) {
-        const block_q4_1* group =
-            (const block_q4_1*)((const char*)src + i * sizeof(block_q4_1));
-        
-        // Use pointer arithmetic to safely access d and m from the union.
-        // This avoids potential issues with anonymous struct/union handling in C++.
-        //
-        // Memory layout of block_q4_1:
-        //   Offset 0-1: d (ggml_half = uint16_t) - scale factor
-        //   Offset 2-3: m (ggml_half = uint16_t) - minimum value (offset)
-        //   Offset 4+:  qs[] - quantized values
-        //
-        // The union allows accessing bytes 0-3 as either:
-        //   - Two separate halves: d and m
-        //   - One packed value: dm (ggml_half2 = uint32_t)
-        //
-        // Previous code used group->d and group->m directly, which may fail
-        // in C++ when the compiler doesn't properly resolve anonymous struct
-        // members within anonymous unions.
-        const uint16_t* dm_ptr = (const uint16_t*)group;
-        *scale_d_offset = dm_ptr[0];  // d is at offset 0
-        
-        // Q4_1 dequantization formula: value = quant * d + m (where quant ∈ [0, 15])
-        // 
-        // After XOR 0x88 transform: quant' = quant - 8 (maps 0..15 to -8..7)
-        // CANN formula: result = quant' * scale + offset
-        // 
-        // Try: offset = -m (testing if CANN uses subtraction internally)
-        //
-        float d_fp32 = GGML_FP16_TO_FP32(dm_ptr[0]);
-        float m_fp32 = GGML_FP16_TO_FP32(dm_ptr[1]);
-        float offset_fp32 = -m_fp32;  // Try -m
-        (void)d_fp32;  // suppress unused warning
-        *scale_m_offset = GGML_FP32_TO_FP16(offset_fp32);
+        const block_q4_1* b =
+            (const block_q4_1*)((const char*)src + g * sizeof(block_q4_1));
 
-#ifdef DEBUG_Q4_1_TRANSFORM
-        if (i < 3) {  // Print first 3 groups for debugging
-            uint16_t offset_fp16 = GGML_FP32_TO_FP16(offset_fp32);
-            float offset_back = GGML_FP16_TO_FP32(offset_fp16);
-            fprintf(stderr, "[DEBUG Q4_1] group[%d]: d=0x%04x, m=0x%04x, offset_stored=0x%04x\n",
-                    i, dm_ptr[0], dm_ptr[1], offset_fp16);
-            fprintf(stderr, "             d=%.6f, m=%.6f, offset=%.6f (stored=%.6f)\n",
-                    d_fp32, m_fp32, offset_fp32, offset_back);
-            // Verify: for quant=0 and quant=15, check expected values
-            float val_q0 = 0.0f * d_fp32 + m_fp32;  // original formula for quant=0
-            float val_q15 = 15.0f * d_fp32 + m_fp32; // original formula for quant=15
-            float cann_q0 = -8.0f * d_fp32 + offset_fp32;  // CANN formula for quant'=-8
-            float cann_q15 = 7.0f * d_fp32 + offset_fp32;  // CANN formula for quant'=7
-            fprintf(stderr, "             orig[q=0]=%.6f, orig[q=15]=%.6f\n", val_q0, val_q15);
-            fprintf(stderr, "             cann[q'=-8]=%.6f, cann[q'=7]=%.6f\n", cann_q0, cann_q15);
-        }
-#endif
+        // scale & mean stored after quant_bytes
+        *scale_offset++ = GGML_FP16_TO_FP32(b->d);
+        *mean_offset++  = GGML_FP16_TO_FP32(b->m);
 
-        scale_d_offset++;
-        scale_m_offset++;
+        // pack 32×4bit → 16 bytes
+        const uint8_t* qs = b->qs;
 
         // 0-15
-        for (int j = 0; j < QK4_1 / 2; j += 2) {
-            (*quant_offset) = (group->qs[j] & 0x0F);
-            (*quant_offset) |= ((group->qs[j + 1] << 4));
-            quant_offset++;
+        for (int j = 0; j < QK4_1/2; j += 2) {
+            uint8_t q0 = qs[j]     & 0x0F;
+            uint8_t q1 = qs[j + 1] & 0x0F;
+            *quant_offset++ = (q1 << 4) | q0;
         }
 
         // 16-31
-        for (int j = 0; j < QK4_1 / 2; j += 2) {
-            (*quant_offset) = (group->qs[j] >> 4);
-            (*quant_offset) |= (group->qs[j + 1] & 0xF0);
-            quant_offset++;
+        for (int j = 0; j < QK4_1/2; j += 2) {
+            uint8_t q0 = (qs[j]     >> 4) & 0x0F;
+            uint8_t q1 = (qs[j + 1] >> 4) & 0x0F;
+            *quant_offset++ = (q1 << 4) | q0;
         }
     }
 
-    // put (uint4b_t -8) into int4b_t
-    for (quant_offset = (uint8_t*)dst;
-         quant_offset < (uint8_t*)dst + quant_bytes; quant_offset++) {
-        (*quant_offset) ^= 0x88;
+    // XOR like q4_0
+    for (uint8_t* p = (uint8_t*)dst;
+         p < (uint8_t*)dst + quant_bytes; p++) {
+        *p ^= 0x88;
     }
 }
+
 
 /**
  * @brief Transform CANN processed data back into quantized Q4.1 format.
@@ -1151,50 +1193,57 @@ static void ggml_backend_cann_transform_q4_1(ggml_tensor* tensor,
  * will be stored.
  */
 static void ggml_backend_cann_transform_back_q4_1(
-    const ggml_tensor* tensor, void* src, void* dst) {
+    const ggml_tensor* tensor,
+    void* src,
+    void* dst) {
+
     int64_t n_elems = ggml_nelements(tensor);
     int64_t groups = n_elems / QK4_1;
-    size_t quant_bytes = n_elems * sizeof(uint8_t) / 2;
+    size_t quant_bytes = n_elems / 2;
 
     uint8_t* quant_offset = (uint8_t*)src;
-    uint16_t* scale_d_offset = (uint16_t*)((char*)src + quant_bytes);
-    uint16_t* scale_m_offset = scale_d_offset + groups;
 
-    for (; quant_offset < (uint8_t*)src + quant_bytes; quant_offset++) {
-        (*quant_offset) ^= 0x88;
+    uint16_t* scale_offset =
+        (uint16_t*)((char*)src + quant_bytes);
+
+    uint16_t* mean_offset =
+        scale_offset + groups;
+
+    // undo XOR
+    for (uint8_t* p = quant_offset;
+         p < quant_offset + quant_bytes; p++) {
+        *p ^= 0x88;
     }
+
+    // reset for reading
     quant_offset = (uint8_t*)src;
 
-    for (int i = 0; i < groups; i++) {
-        block_q4_1* group = (block_q4_1*)((char*)dst + i * sizeof(block_q4_1));
-        // Use pointer arithmetic to safely write d and m to the union
-        uint16_t* dm_ptr = (uint16_t*)group;
-        dm_ptr[0] = *scale_d_offset;  // d is at offset 0
-        
-        // Reverse: m = offset - 8*d
-        float d_fp32 = GGML_FP16_TO_FP32(*scale_d_offset);
-        float offset_fp32 = GGML_FP16_TO_FP32(*scale_m_offset);
-        float m_fp32 = offset_fp32 - 8.0f * d_fp32;
-        dm_ptr[1] = GGML_FP32_TO_FP16(m_fp32);
-        
-        scale_d_offset++;
-        scale_m_offset++;
+    for (int g = 0; g < groups; g++) {
 
-        // 0-15
-        for (int j = 0; j < QK4_1 / 2; j += 2) {
-            group->qs[j] = ((*quant_offset) & 0x0F);
-            group->qs[j + 1] = ((*quant_offset) >> 4);
-            quant_offset++;
+        block_q4_1* b =
+            (block_q4_1*)((char*)dst + g * sizeof(block_q4_1));
+
+        b->d = GGML_FP32_TO_FP16(*(scale_offset++));
+        b->m = GGML_FP32_TO_FP16(*(mean_offset++));
+
+        uint8_t* qs = b->qs;
+
+        // unpack front 16 bytes
+        for (int j = 0; j < QK4_1/2; j += 2) {
+            uint8_t v = *quant_offset++;
+            qs[j]     =  v & 0x0F;
+            qs[j+1]   = (v >> 4);
         }
 
-        // 16-31
-        for (int j = 0; j < QK4_1 / 2; j += 2) {
-            group->qs[j] |= ((*quant_offset) << 4);
-            group->qs[j + 1] |= ((*quant_offset) & 0xF0);
-            quant_offset++;
+        // unpack later 16 bytes
+        for (int j = 0; j < QK4_1/2; j += 2) {
+            uint8_t v = *quant_offset++;
+            qs[j]     |= (v << 4);
+            qs[j+1]   |= (v & 0xF0);
         }
     }
 }
+
 
 /**
  * @brief Transform quantized Q8.1 tensor data into a format suitable for CANN
